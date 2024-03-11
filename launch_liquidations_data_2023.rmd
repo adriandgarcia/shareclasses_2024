@@ -1,0 +1,679 @@
+---
+title: "index"
+author: "ADG"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+# Intro
+
+## Getting Started
+
+Data pulled from Morningstar Direct on Jan. 24, 2023. Files combined using _combine_files.r_. 
+Data in M* filtered:
+
+* != Fund of funds: Yes
+* != US Category: Money Market
+
+57,451 rows, 117 columns
+
+Added column _Obsolete_ to indicate if share class is in existence or obsolete. I assume a blank _Obsolete..Date_ means the share class still exists.
+
+Also added _Inception_Year_ and _Obsolete_Year_ because these variables are used below.
+
+Data filtered to remove:
+
+* "Load Waived" Share.Class.Type
+* Share classes launched and liquidated during the same 18 month period
+* Share classes launched after 2022
+
+48,761 rows, 121 columns
+
+```{r setup, message = FALSE, warning = FALSE}
+
+library(tidyverse) #For Data Analysis
+library(lubridate) #For working with dates
+library(DT) #For visualizing tables
+
+
+Full <- read_csv("data_combined.csv",
+                 guess_max = 20000) %>%
+  rename_all(make.names) %>%
+  mutate(
+    Inception_Year = year(Inception..Date),
+    Obsolete_Year = year(Obsolete..Date),
+    Obsolete =
+      case_when(!is.na(Obsolete..Date) ~ "Obsolete",
+                TRUE ~ "Exists"),
+    Life_Span = time_length(interval(Inception..Date, Obsolete..Date), "month")
+  ) %>%
+  filter(
+    Share.Class.Type != "Load Waived" |
+      is.na(Share.Class.Type),
+    Life_Span >= 18 |
+      is.na(Obsolete_Year) |
+      is.na(Inception_Year),
+    Inception_Year < 2023)
+
+```
+
+# Overview
+
+```{r graph_overview, echo=FALSE}
+
+ggplot(data = Full, mapping = aes(x = year(Inception..Date), fill = Obsolete)) +
+  geom_bar(position = "stack") +
+  ggtitle("Share Class Launches") +
+  ylab("Count") +
+  xlab("YEAR") +
+  theme_classic() +
+  theme(plot.title = element_text(size = 11, face = "bold"))
+
+```
+
+## Net Count
+
+There was a large drop off in launches in 2020 compared to recent years. However it appears rationalization continued at roughly the same levels as recent years.
+
+
+```{r data_overview, echo = TRUE, message = FALSE}
+
+#A function to count the number of share classes either created or liquidated each year
+
+Year_Count <- function(colz){
+ Full %>%
+    group_by_at(colz) %>% 
+    summarise(Count = n(), .groups = "drop") %>% 
+    arrange(desc(.[[1]]))
+    }
+    
+
+inception_year <- Year_Count(colz = c("Inception_Year")) #Tallys share classes by year created
+obsolete_year <- Year_Count(colz = c("Obsolete_Year")) #Tallys share classes by year liquidated
+
+merge_type <- Year_Count(colz = c("Obsolete_Year", "Obsolete..Type")) #Tallys share classes by year liquidated and liquidation type
+
+
+#Counts the net number of share classes created/cut
+
+Net_Count <- full_join(inception_year, obsolete_year, by = c("Inception_Year" = "Obsolete_Year"),
+                       suffix = c("_inception", "_obsolete")) %>% 
+  rename(Year = Inception_Year) %>% 
+  group_by(Year) %>% 
+  mutate(Net_Count = sum(Count_inception, -Count_obsolete, na.rm = TRUE))
+```
+
+```{r data_overview_tbl, echo = FALSE}
+
+datatable(Net_Count, colnames = c('Share_Classes_Launched' = 3, 'Share_Classes_Cut' = 4))
+
+```
+
+## New Funds
+
+The data from Morningstar is at the share class level. This is a method to look at launches at the fund level.
+
+```{r new_funds, message=FALSE}
+
+#This looks at when a fund's oldest share class was created
+#This assumes that the oldest share class's inception date is equal to the fund's creation date
+
+New_Funds <- Full %>% 
+  filter(Oldest..Share.Class == "Yes") %>% 
+  group_by(Inception_Year, Index..Fund) %>% 
+  summarise(Count = n(), .groups = "drop") %>% 
+  mutate(
+    Pct_Change = round(
+      ((Count/lag(Count) - 1) * 100),
+      1
+    )) %>% 
+  arrange(desc(Inception_Year))
+
+```
+
+
+```{r new_funds_graphs, echo=FALSE}
+
+ggplot(data = New_Funds, mapping = aes(x =Inception_Year, y=Count, color=Index..Fund)) +
+  geom_line() +
+  ggtitle("New Fund Launches") +
+  ylab("Count") +
+  xlab("YEAR") +
+  theme_classic() +
+  theme(plot.title = element_text(size = 11, face = "bold"))
+
+New_Funds %>% 
+  select(-Pct_Change) %>% 
+  pivot_wider(names_from = Index..Fund, values_from = Count) %>%
+  rename(
+    Passive = Yes,
+    Active = No
+    ) %>% 
+  group_by(Inception_Year) %>% 
+  mutate(total = sum (Active, Passive, na.rm = TRUE)) %>% 
+    datatable()
+
+```
+
+## New Funds (Alternative)
+
+The method above uses the inception date of the _Oldest..Share.Class_ as a proxy for when a fund was created. This method uses _FundId_.
+
+The oldest inception date related to a _FundID_ is a proxy for when the fund was created. Or the oldest obsolete date related to a a _FundID_ (with no active share classes) is likely when that fund was liquidated/merged.
+
+There were some cases identified in the data where a FundID had no corresponding _Oldest..Share.Class_. This could be an error or signal that a fund's oldest share class is not captured in the data from Morningstar.
+
+The results for 2020 ended up equal using the method above.
+
+This method shows there were 15,825 funds in 2020 vs 15,677 in 2019 -- a change of 148 funds.
+This method shows there were 15,464 in 2018 -- a change of 213 funds.
+
+
+```{r fund_id, echo = FALSE, message = FALSE}
+
+# a function to count share classes launched/liquidated before a certain date, grouped by their FundId
+
+status_count <- function(date_v) {
+  #prefix for column names created by pivot_wider
+  prefix <- paste("Count_", year(date_v), "_", sep = "")
+  #variable to later call Aldready_Obsolete column
+  obnow <- paste("Count_", year(date_v), "_", "Already_Obsolete", sep = "")
+  #variable to later call Becomes_Obsolete column
+  oblater <- paste("Count_", year(date_v), "_", "Becomes_Obsolete", sep = "")
+  #variable to later call Not_Obsolete column
+  exsts <- paste("Count_", year(date_v), "_", "Not_Obsolete", sep = "")
+  #dataframe
+  Full %>%
+    #filter to look at only funds that were created before a certain date
+    filter((Inception..Date < date_v | is.na(Inception..Date))) %>%
+    #creates new column to determine if a share class becomes obsolete after date_v
+    mutate(
+      Obsolete_Past =
+        case_when(
+          #obsolete dates on or after date_v mean share class becomes obsolete
+          Obsolete..Date >= date_v ~ "Becomes_Obsolete",
+          #obsolete dates before date_v mean share class already obsolete
+          Obsolete..Date < date_v ~ "Already_Obsolete",
+          #blank obsolete dats mean the fund is not obsolete
+          is.na(Obsolete..Date) ~ "Not_Obsolete",
+          #if above criteria not met throws "ERROR"
+          TRUE ~ "ERROR"
+        )
+    ) %>%
+    group_by(FundId, Obsolete_Past) %>%
+    #counts how many share classes in each fund (FundID) are obsolete using Obsolete_Past
+    summarise(Count = n(), .groups = "drop") %>%
+    #Turns dataframe wider so each Obsolete_Past catagory has its own column
+    pivot_wider(
+      names_from = Obsolete_Past,
+      values_from = Count,
+      names_prefix = c(prefix)
+    )  %>%
+    #Adds New Column that determines the overall status of the fund based on share classes
+    mutate(
+      !!paste0("Fund_Status_", year(date_v)) :=
+        case_when(
+          #Zero Not_Obsolete or Becomes_Obsolete share classes with at least one Already_Obsolete sc equals an Obsolete_Fund
+          is.na(!!sym(exsts)) &
+            is.na(!!sym(oblater)) &
+            !!sym(obnow) >= 1 ~ "Obsolete_Fund",
+          #Zero Not_Obsolete share classes with at least 1 Becomes_Obsolete sc equals a fund that Becomes_Obsolete
+          is.na(!!sym(exsts)) &
+            !!sym(oblater) >= 1 ~ "Obsolete_Later",
+          #At least one share class that is Not_Obsolete means the fund exists as of date_v
+          !is.na(!!sym(exsts)) ~ "Exists_Fund",
+          TRUE ~ "Other"
+        ))
+  }
+
+
+#a breakdown of active vs. obsolete funds as of Dec. 31, 2022
+status_2022 <- status_count("2023-01-01")
+#a breakdown of active vs. obsolete funds as of Dec. 31, 2021
+status_2021 <- status_count("2022-01-01")
+#a breakdown of active vs. obsolete funds as of Dec. 31, 2020
+status_2020 <- status_count("2021-01-01")
+
+#a breakdown of active funds as of date
+status_summary <- function(x){
+  x %>% 
+    group_by_at(5) %>% 
+    count(name = "Count")
+  }
+
+
+#a breakdown of active funds as of Dec. 31, 2022
+status_summary_2022 <- status_summary(status_2022)
+
+#a breakdown of active vs. obsolete funds as of Dec. 31, 2021
+status_summary_2021 <- status_summary(status_2021)
+
+#a breakdown of active vs. obsolete funds as of Dec. 31, 2020
+status_summary_2020 <- status_summary(status_2020)
+
+```
+# Companies
+
+To look at which firms cut or added share classes I first clean up the company names with Branding.Names.Mod. 
+
+```{r companies, echo = TRUE}
+
+
+company_change <- Full %>%
+  mutate(
+    Branding.Name.Mod =
+      case_when(
+        grepl("State Street", Branding.Name) ~ "State Street",
+        grepl("TIAA", Branding.Name) ~ "TIAA/Nuveen",
+        grepl("Nuveen", Branding.Name) ~ "Morgan Stanley",
+        grepl("Eaton Vance", Branding.Name) ~ "Morgan Stanley",
+        grepl("Calvert", Branding.Name) ~ "Eaton Vance/Calvert",
+        grepl("iShares", Branding.Name) ~ "iShares/BlackRock",
+        grepl("BlackRock", Branding.Name) ~ "iShares/BlackRock",
+        grepl("PowerShares", Branding.Name) ~ "PowerShares/Invesco",
+        grepl("Invesco", Branding.Name) ~ "PowerShares/Invesco",
+        grepl("DWS$", Branding.Name) ~ "DWS/Xtrackers",
+        grepl("Xtrackers", Branding.Name) ~ "DWS/Xtrackers",
+        grepl("^Capital Group", Branding.Name) ~ "American Funds",
+        Branding.Name %in% c("Harding Loevner", "Third Avenue",
+                             "Tweedy, Browner") ~ "AMG",
+        Branding.Name == "Oppenheimer" ~ "PowerShares/Invesco",
+        Branding.Name == "Wells Fargo" ~ "Allspring",
+        Branding.Name %in% "Amundi" ~ "Pioneer Investments",
+        TRUE ~ Branding.Name
+      ))
+    
+    
+
+    
+    company_level_2017 <- company_change %>%
+      filter(Inception_Year <= 2017) %>% 
+      mutate(
+        Count_2017 =
+          case_when(
+            is.na(Obsolete_Year) ~ "Exists_2017",
+            Obsolete_Year <= 2017 ~ "Obsolete_2017",
+            Obsolete_Year > 2017 ~ "Exists_2017",
+            TRUE ~ "Other"
+      ))
+    
+    company_level_2017 <- company_level_2017 %>%
+      select(Branding.Name.Mod,
+                Name,
+                FundId,
+                Count_2017) %>%
+      group_by(Branding.Name.Mod, Name, Count_2017) %>%
+      summarise(Tally_2017 = n()) %>%
+      pivot_wider(names_from = Count_2017,
+                  values_from = Tally_2017)
+    
+
+      
+
+      company_level_2022 <- company_change %>%
+      filter(Inception_Year <= 2022) %>% 
+      mutate(
+        Count_2022 =
+          case_when(
+            is.na(Obsolete_Year) ~ "Exists_2022",
+            Obsolete_Year <= 2022 ~ "Obsolete_2022",
+            Obsolete_Year > 2022 ~ "Exists_2022",
+            TRUE ~ "Other"
+      ))
+    
+    company_level_2022 <- company_level_2022 %>%
+      select(Branding.Name.Mod,
+                Name,
+                FundId,
+                Count_2022) %>%
+      group_by(Branding.Name.Mod, Name, Count_2022) %>%
+      summarise(Tally_2022 = n()) %>%
+      pivot_wider(names_from = Count_2022,
+                  values_from = Tally_2022)
+    
+    company_level_change <-
+      full_join(company_level_2017, company_level_2022)
+    
+    company_level_change <- company_level_change %>%
+      group_by(Branding.Name.Mod) %>%
+      summarise(Exists_2022 = sum(Exists_2022, na.rm = T),
+                Exists_2017 = sum(Exists_2017, na.rm = T),
+                Change = sum(Exists_2022,-Exists_2017, na.rm = T))
+    
+    
+    
+    company_funds <- company_change %>%
+      group_by(FundId) %>%
+      mutate(
+        Newest_ObDate = max(Obsolete_Year),
+        Oldest_InDate = min(Inception_Year)
+      ) %>%
+      group_by(Branding.Name.Mod,
+               FundId,
+               Newest_ObDate,
+               Oldest_InDate) %>%
+      summarise() %>%
+      mutate(
+        Count_2022 =
+          case_when(
+            is.na(Newest_ObDate) ~ 1,
+            Newest_ObDate == 2023 ~ 1,
+            Newest_ObDate <= 2022 ~ 0
+          ),
+        Count_2017 =
+          case_when(
+            is.na(Newest_ObDate) & Oldest_InDate <= 2017 ~ 1,
+            Oldest_InDate > 2017 | Newest_ObDate <= 2017 ~ 0,
+            Newest_ObDate > 2017 ~ 1
+          )
+      )
+    
+        
+    company_fund_change <- company_funds %>%
+      group_by(Branding.Name.Mod) %>%
+      summarise(
+        Total_2017 = sum(Count_2017, na.rm = T),
+        Total_2022 = sum(Count_2022, na.rm = T),
+        Difference = sum(Total_2022,-Total_2017, na.rm = T)
+      )
+    
+    company_count <- function(x, colz) {
+      company_change %>%
+        group_by_at(colz) %>%
+        summarise(Count = n()) %>%
+        ungroup() %>%
+        arrange(desc(.[[2]]))
+    }
+    
+    comp_inception <-
+      company_count(colz = c("Branding.Name.Mod", "Inception_Year"))
+    comp_obsolete <-
+      company_count(colz = c("Branding.Name.Mod", "Obsolete_Year"))
+    
+    comp_new_funds <-
+      company_count(
+        colz = c("Branding.Name.Mod", "Inception_Year", "Oldest..Share.Class")
+      ) %>%
+      filter(Oldest..Share.Class == "Yes")
+    
+    comp_old_funds <-
+      company_count(
+        colz = c("Branding.Name.Mod", "Obsolete_Year", "Oldest..Share.Class")
+      ) %>%
+      filter(Oldest..Share.Class == "Yes")
+    
+    comp_rank <- function(x) {
+      x %>%  filter(.[[2]] == "2022") %>%
+        mutate(Rank = rank(-Count)) %>%
+        filter(Rank <= 20) %>%
+        arrange(Rank)
+    }
+    
+    top_cutters <- comp_rank(comp_obsolete)
+    top_old_cutters <-  comp_rank(comp_old_funds)
+    
+    top_launchers <- comp_rank(comp_inception)
+    top_new_launchers <- comp_rank(comp_new_funds)
+    
+```
+
+
+```{r level, echo=FALSE}
+
+datatable(company_level_change)
+
+```
+
+## Top Launchers
+
+(Share Class)
+
+```{r launchers, echo=FALSE}
+
+datatable(top_launchers)
+
+```
+
+## Top New Fund Launchers
+
+(Oldest Share Class)
+
+```{r new_launchers, echo=FALSE}
+
+datatable(top_new_launchers)
+
+```
+
+
+## Top Cutters
+
+(Share Class)
+
+```{r cutters, echo=FALSE}
+
+datatable(top_cutters)
+
+```
+
+## Top Fund Cutters
+
+(Oldest Share Class)
+
+```{r old_cutters, echo=FALSE}
+
+datatable(top_old_cutters)
+
+```
+# Share Class Overview
+
+##Launches
+
+```{r share_class_overview, message=FALSE}
+
+simp_count <- function(x, colz){
+  Full %>%  
+    group_by_at(colz) %>% 
+    count(name = "Count")
+  }
+```
+
+From Morningstar Direct
+
+```{r share_class_overview_graphic, echo=FALSE}
+
+share_class_add_count <- simp_count(colz = c("Inception_Year", "Share.Class.Type"))
+
+ggplot(data = share_class_add_count, aes(x = Inception_Year, y = Count, fill = Share.Class.Type)) +
+  geom_bar(stat = "identity") + 
+  scale_x_continuous(breaks = seq.int(from = 1900, to = 2021, by = 50)) +
+  scale_y_continuous(breaks = seq.int(from = 0, to = 500, by = 250)) +
+  facet_wrap(~Share.Class.Type) +
+  ggtitle("Launches (Share Class Type)") +
+  ylab("Count") +
+  xlab("YEAR") +
+  theme_classic() +
+  theme(plot.title = element_text(size = 11, face = "bold"))
+```
+
+## 2022 Launches
+
+```{r share_class_2022_launches, echo=FALSE}
+
+share_class_add_count  %>% 
+  filter(Inception_Year == "2022") %>% 
+  arrange(desc(Count)) %>% 
+  datatable()
+
+```
+
+##Liquidations
+
+```{r share_class__cuts_overview_graphic, echo=FALSE}
+
+share_class_cut_count <- simp_count(colz = c("Obsolete_Year", "Share.Class.Type"))
+
+ggplot(data = share_class_cut_count, aes(x = Obsolete_Year, y = Count, fill = Share.Class.Type)) +
+  geom_bar(stat = "identity") + 
+  scale_x_continuous(breaks = seq.int(from = 1900, to = 2020, by = 50)) +
+  scale_y_continuous(breaks = seq.int(from = 0, to = 1000, by = 250)) +
+  facet_wrap(~Share.Class.Type) +
+  ggtitle("Cuts (Share Class Type)") +
+  ylab("Count") +
+  xlab("YEAR") +
+  theme_classic() +
+  theme(plot.title = element_text(size = 11, face = "bold"))
+
+```
+
+## 2022 Liquidations
+
+```{r share_class_2022_cuts, echo=FALSE}
+
+share_class_cut_count  %>% 
+  filter(Obsolete_Year == "2022") %>% 
+  arrange(desc(Count)) %>% 
+  datatable()
+
+```
+## Other/NA
+
+This is an attempt to determine the share class type in cases where Morningstar has the share classs listed as other or NA. 
+
+```{r share_clas_view, echo=FALSE}
+
+#The data from Morningstar is dirty. This pattern pulls the last letters/digits in the mutual fund name to identify the share class.
+
+PATTERN <-
+  c(
+    "(\\s)?([:alnum:]+)?([:alnum:][:punct:][:alnum:] LW)?( Load Waived)?([:alpha:]+ [:digit:]+)?( LW)?([:punct:]+)?([:alnum:]+)?(-[:alnum:])?(™)?(\\{[:alnum:]+\\})?([:punct:]..[:punct:])?(\\s)?([:punct:][:alnum:]+[:punct:])?$"
+  )
+
+#The data from Morningstar is dirty. This pattern refines the pattern above to identify the share class.
+
+CUT <-
+  c(
+    "[:alpha:]+ (?=529.+)|([\\{\\(][:alnum:]+[\\}\\)])|([:punct:]\\X\\X$)|(-)|(\\sLW)|(\\sLoad\\sWaived)|(\\([:alpha:]+\\))"
+  )
+
+#The data from Morningstar is dirty. This pattern makes manual changes to share classification for when the patterns above failed.
+
+CHANGE <- c(
+  "^Adm(in$)?(in[:alpha:]+)?$" = "Admin",
+  "[:alnum:]+R6$" = "R6",
+  "(?!AA)[:alpha:]+A$" = "A",
+  "A\\{m" = "A",
+  "([:alpha:]+)([:punct:])?([:alpha:]+)?A$" = "A",
+  "([:alpha:]+)([:punct:])?([:alpha:]+)?C$" = "C",
+  "PlusC([:digit:]+)$" = "C",
+  "([:alpha:]+)?([:Punct:][:alpha:]+)?Inst(l$)?(itutional$)?$" = "Instl",
+  "([:alnum:]+)?Ins$" = "Instl",
+  "([:alnum:]+)?Insl$" = "Instl",
+  "[:alnum:]+Ist$" = "Instl",
+  "I{1}" = "Instl",
+  "([:alpha:]+)?([:punct:])?([:alpha:]+)?Y$" = "Y",
+  "([:alpha:]+)?([:punct:])?([:alpha:]+)?R$(?<!(SDR$)|(IR$))" = "R",
+  "[:alnum:]+R5$" = "R5",
+  "([:alpha:]+)?([:Punct:][:alpha:]+)?In([vest]+)?(ment$)?$(?<!(Int$))" = "Investor",
+  "([:alpha:]+)?([:punct:])?([:alpha:]+)?N$" = "N",
+  "([:alpha:]+)?([:punct:])?([:alpha:]+)?T$" = "T",
+  "[:alnum:]+R4$" = "R4",
+  "([:alpha:]+)?([:Punct:][:alpha:]+)?Adv(iser$)?(isory$)?$" = "Advisor",
+  "([:alpha:]+)?([:Punct:][:alpha:]+)?ADV$" = "Advisor",
+  "([:alpha:]+)?([:punct:])?([:alpha:]+)?K$" = "K",
+  "([:alpha:]+)?([:punct:])?([:alpha:]+)?F$" = "F",
+  "[:alnum:]+R3$" = "R3",
+  "[:alnum:]+F3$" = "F3",
+  "([:alpha:]+)?([:punct:])?([:alpha:]+)?IS$" = "IS",
+  "Retire(ment)?$" = "R",
+  "(?![FIVS]+I$|([:alpha:]+)?II$)([:alpha:]+)?I$(?<!(IR$))" = "I",
+  "([:alpha:]+)([:punct:])?([:alpha:]+)?I$(?<!(F/I$))" = "I"
+)
+
+
+#Using the above patterns we can clean the share class information
+#Name -> Extract -> New -> Revision
+
+INC_Data <- Full %>%
+  select(Name) %>%
+  mutate(
+    Match = str_detect(Name, PATTERN),
+    EXTRACT = str_extract(Name, PATTERN),
+    New = str_trim(str_replace_all(EXTRACT,  CUT, "")),
+    Revision = str_replace_all(New, CHANGE)
+    )
+
+
+#This counts the number of share class types in the data
+INC_Summary <- INC_Data %>%
+  group_by(Revision) %>%
+  summarise(cases = n()) %>%
+  arrange(-cases)
+
+
+#This  takes the Full dataframe and adds new columns showinbg how we detected the share class (EXTRACT, New, Revision)
+#In cases where Share.Class.Type is either NA or Other we subsistute Revision
+INC_MODIFIED <- Full %>%
+  mutate(
+    Match = str_detect(Name, PATTERN),
+    EXTRACT = str_extract(Name, PATTERN),
+    New = str_trim(str_replace_all(EXTRACT,  CUT, "")),
+    Revision = str_replace_all(New, CHANGE),
+    Share_Class_Mod =
+      case_when(
+        is.na(Share.Class.Type) ~ Revision,
+        Share.Class.Type == "Other" ~ Revision,
+        Share.Class.Type == "Retirement" ~ Revision,
+        TRUE ~ Share.Class.Type
+      ))
+
+
+
+```
+
+## Changes
+
+```{r share_class_overview_changes, echo=FALSE}
+
+INC_Data %>% 
+  select(-Match, everything()) %>% 
+  datatable()
+
+```
+
+## Inception Year
+(2022)
+
+```{r share_class_inception_dt, echo = FALSE}
+
+INC_MODIFIED %>%
+  select(Name, Share.Class.Type, Revision, Share_Class_Mod, Inception_Year, Obsolete_Year) %>% 
+  filter(Inception_Year == 2022 | Inception_Year == 2021) %>% 
+  group_by(Share_Class_Mod, Inception_Year) %>%
+  summarise(cases = n()) %>%
+  arrange(-cases)  %>% 
+  pivot_wider(values_from = cases, names_from = Inception_Year) %>% 
+  view()
+
+```
+
+## Obsolete Year
+
+(2022)
+
+```{r share_class_obsolete_dt, echo = FALSE}
+
+INC_MODIFIED %>%
+  select(Name, Share.Class.Type, Revision, Share_Class_Mod, Inception_Year, Obsolete_Year) %>% 
+  filter(Obsolete_Year == 2022 | Obsolete_Year == 2021) %>% 
+  group_by(Share_Class_Mod, Obsolete_Year) %>%
+  summarise(cases = n()) %>%
+  arrange(-cases)  %>% 
+  pivot_wider(values_from = cases, names_from = Obsolete_Year) %>% 
+  view()
+
+```
+
