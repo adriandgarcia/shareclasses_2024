@@ -13,13 +13,12 @@ output:
 
 ## Getting Started
 
-Data pulled from Morningstar Direct on Jan. 24, 2023. Files combined using _combine_files.r_. 
+Data pulled from Morningstar Direct on March 11, 20243. Files combined using _combine_files.r_. 
 Data in M* filtered:
 
-* != Fund of funds: Yes
-* != US Category: Money Market
+* Obsolete >= 2018-01-01
 
-57,451 rows, 117 columns
+33860 rows, 102 columns
 
 Added column _Obsolete_ to indicate if share class is in existence or obsolete. I assume a blank _Obsolete..Date_ means the share class still exists.
 
@@ -28,8 +27,10 @@ Also added _Inception_Year_ and _Obsolete_Year_ because these variables are used
 Data filtered to remove:
 
 * "Load Waived" Share.Class.Type
+*Fund of funds
+* money markets
 * Share classes launched and liquidated during the same 18 month period
-* Share classes launched after 2022
+* Share classes launched after 2023
 
 48,761 rows, 121 columns
 
@@ -39,6 +40,9 @@ library(tidyverse) #For Data Analysis
 library(lubridate) #For working with dates
 library(DT) #For visualizing tables
 
+current <- "2023"
+last <- "2022"
+five_year <- "2018"
 
 Full <- read_csv("data_combined.csv",
                  guess_max = 20000) %>%
@@ -57,7 +61,11 @@ Full <- read_csv("data_combined.csv",
     Life_Span >= 18 |
       is.na(Obsolete_Year) |
       is.na(Inception_Year),
-    Inception_Year < 2023)
+    Inception_Year < 2024,
+    Fund.of..Funds ==  "No",
+    US.Category.Group != "Money Market" |
+      is.na(US.Category.Group)
+)
 
 ```
 
@@ -231,12 +239,12 @@ status_count <- function(date_v) {
   }
 
 
+#a breakdown of active vs. obsolete funds as of Dec. 31, 2023
+status_2023 <- status_count("2022-01-01")
 #a breakdown of active vs. obsolete funds as of Dec. 31, 2022
-status_2022 <- status_count("2023-01-01")
+status_2022 <- status_count("2021-01-01")
 #a breakdown of active vs. obsolete funds as of Dec. 31, 2021
-status_2021 <- status_count("2022-01-01")
-#a breakdown of active vs. obsolete funds as of Dec. 31, 2020
-status_2020 <- status_count("2021-01-01")
+status_2021 <- status_count("2020-01-01")
 
 #a breakdown of active funds as of date
 status_summary <- function(x){
@@ -246,14 +254,14 @@ status_summary <- function(x){
   }
 
 
-#a breakdown of active funds as of Dec. 31, 2022
-status_summary_2022 <- status_summary(status_2022)
+#a breakdown of active funds as of Dec. 31, 2023
+status_summary_2023 <- status_summary(status_2023)
 
 #a breakdown of active vs. obsolete funds as of Dec. 31, 2021
-status_summary_2021 <- status_summary(status_2021)
+status_summary_2022 <- status_summary(status_2022)
 
 #a breakdown of active vs. obsolete funds as of Dec. 31, 2020
-status_summary_2020 <- status_summary(status_2020)
+status_summary_2021 <- status_summary(status_2021)
 
 ```
 # Companies
@@ -290,59 +298,59 @@ company_change <- Full %>%
     
 
     
-    company_level_2017 <- company_change %>%
-      filter(Inception_Year <= 2017) %>% 
+    company_level_2018 <- company_change %>%
+      filter(Inception_Year <= five_year) %>% 
       mutate(
-        Count_2017 =
+        Count_2018 =
           case_when(
-            is.na(Obsolete_Year) ~ "Exists_2017",
-            Obsolete_Year <= 2017 ~ "Obsolete_2017",
-            Obsolete_Year > 2017 ~ "Exists_2017",
+            is.na(Obsolete_Year) ~ "Exists_2018",
+            Obsolete_Year <= five_year ~ "Obsolete_2018",
+            Obsolete_Year > five_year ~ "Exists_2018",
             TRUE ~ "Other"
       ))
     
-    company_level_2017 <- company_level_2017 %>%
+    company_level_2018 <- company_level_2018 %>%
       select(Branding.Name.Mod,
                 Name,
                 FundId,
-                Count_2017) %>%
-      group_by(Branding.Name.Mod, Name, Count_2017) %>%
-      summarise(Tally_2017 = n()) %>%
-      pivot_wider(names_from = Count_2017,
-                  values_from = Tally_2017)
+                Count_2018) %>%
+      group_by(Branding.Name.Mod, Name, Count_2018) %>%
+      summarise(Tally_2018 = n()) %>%
+      pivot_wider(names_from = Count_2018,
+                  values_from = Tally_2018)
     
 
       
 
-      company_level_2022 <- company_change %>%
-      filter(Inception_Year <= 2022) %>% 
+      company_level_2023 <- company_change %>%
+      filter(Inception_Year <= current) %>% 
       mutate(
-        Count_2022 =
+        Count_2023 =
           case_when(
-            is.na(Obsolete_Year) ~ "Exists_2022",
-            Obsolete_Year <= 2022 ~ "Obsolete_2022",
-            Obsolete_Year > 2022 ~ "Exists_2022",
+            is.na(Obsolete_Year) ~ "Exists_2023",
+            Obsolete_Year <= current ~ "Obsolete_2023",
+            Obsolete_Year > current ~ "Exists_2023",
             TRUE ~ "Other"
       ))
     
-    company_level_2022 <- company_level_2022 %>%
+    company_level_2023 <- company_level_2023 %>%
       select(Branding.Name.Mod,
                 Name,
                 FundId,
-                Count_2022) %>%
-      group_by(Branding.Name.Mod, Name, Count_2022) %>%
-      summarise(Tally_2022 = n()) %>%
-      pivot_wider(names_from = Count_2022,
-                  values_from = Tally_2022)
+                Count_2023) %>%
+      group_by(Branding.Name.Mod, Name, Count_2023) %>%
+      summarise(Tally_2023 = n()) %>%
+      pivot_wider(names_from = Count_2023,
+                  values_from = Tally_2023)
     
     company_level_change <-
-      full_join(company_level_2017, company_level_2022)
+      full_join(company_level_2018, company_level_2023)
     
     company_level_change <- company_level_change %>%
       group_by(Branding.Name.Mod) %>%
-      summarise(Exists_2022 = sum(Exists_2022, na.rm = T),
-                Exists_2017 = sum(Exists_2017, na.rm = T),
-                Change = sum(Exists_2022,-Exists_2017, na.rm = T))
+      summarise(Exists_2023 = sum(Exists_2023, na.rm = T),
+                Exists_2018 = sum(Exists_2018, na.rm = T),
+                Change = sum(Exists_2023,-Exists_2018, na.rm = T))
     
     
     
@@ -358,17 +366,17 @@ company_change <- Full %>%
                Oldest_InDate) %>%
       summarise() %>%
       mutate(
-        Count_2022 =
+        Count_2023 =
           case_when(
             is.na(Newest_ObDate) ~ 1,
-            Newest_ObDate == 2023 ~ 1,
-            Newest_ObDate <= 2022 ~ 0
+            Newest_ObDate == current ~ 1,
+            Newest_ObDate <= last ~ 0
           ),
-        Count_2017 =
+        Count_2018 =
           case_when(
-            is.na(Newest_ObDate) & Oldest_InDate <= 2017 ~ 1,
-            Oldest_InDate > 2017 | Newest_ObDate <= 2017 ~ 0,
-            Newest_ObDate > 2017 ~ 1
+            is.na(Newest_ObDate) & Oldest_InDate <= five_year ~ 1,
+            Oldest_InDate > five_year | Newest_ObDate <= five_year ~ 0,
+            Newest_ObDate > five_year ~ 1
           )
       )
     
@@ -376,9 +384,9 @@ company_change <- Full %>%
     company_fund_change <- company_funds %>%
       group_by(Branding.Name.Mod) %>%
       summarise(
-        Total_2017 = sum(Count_2017, na.rm = T),
-        Total_2022 = sum(Count_2022, na.rm = T),
-        Difference = sum(Total_2022,-Total_2017, na.rm = T)
+        Total_2018 = sum(Count_2018, na.rm = T),
+        Total_2023 = sum(Count_2023, na.rm = T),
+        Difference = sum(Total_2023,-Total_2018, na.rm = T)
       )
     
     company_count <- function(x, colz) {
@@ -407,7 +415,7 @@ company_change <- Full %>%
       filter(Oldest..Share.Class == "Yes")
     
     comp_rank <- function(x) {
-      x %>%  filter(.[[2]] == "2022") %>%
+      x %>%  filter(.[[2]] == current) %>%
         mutate(Rank = rank(-Count)) %>%
         filter(Rank <= 20) %>%
         arrange(Rank)
@@ -489,7 +497,7 @@ share_class_add_count <- simp_count(colz = c("Inception_Year", "Share.Class.Type
 
 ggplot(data = share_class_add_count, aes(x = Inception_Year, y = Count, fill = Share.Class.Type)) +
   geom_bar(stat = "identity") + 
-  scale_x_continuous(breaks = seq.int(from = 1900, to = 2021, by = 50)) +
+  scale_x_continuous(breaks = seq.int(from = 1900, to = 2023, by = 50)) +
   scale_y_continuous(breaks = seq.int(from = 0, to = 500, by = 250)) +
   facet_wrap(~Share.Class.Type) +
   ggtitle("Launches (Share Class Type)") +
@@ -499,12 +507,12 @@ ggplot(data = share_class_add_count, aes(x = Inception_Year, y = Count, fill = S
   theme(plot.title = element_text(size = 11, face = "bold"))
 ```
 
-## 2022 Launches
+## 2023 Launches
 
-```{r share_class_2022_launches, echo=FALSE}
+```{r share_class_2023_launches, echo=FALSE}
 
 share_class_add_count  %>% 
-  filter(Inception_Year == "2022") %>% 
+  filter(Inception_Year == current) %>% 
   arrange(desc(Count)) %>% 
   datatable()
 
@@ -518,7 +526,7 @@ share_class_cut_count <- simp_count(colz = c("Obsolete_Year", "Share.Class.Type"
 
 ggplot(data = share_class_cut_count, aes(x = Obsolete_Year, y = Count, fill = Share.Class.Type)) +
   geom_bar(stat = "identity") + 
-  scale_x_continuous(breaks = seq.int(from = 1900, to = 2020, by = 50)) +
+  scale_x_continuous(breaks = seq.int(from = 1900, to = 2023, by = 50)) +
   scale_y_continuous(breaks = seq.int(from = 0, to = 1000, by = 250)) +
   facet_wrap(~Share.Class.Type) +
   ggtitle("Cuts (Share Class Type)") +
@@ -529,16 +537,17 @@ ggplot(data = share_class_cut_count, aes(x = Obsolete_Year, y = Count, fill = Sh
 
 ```
 
-## 2022 Liquidations
+## 2023 Liquidations
 
-```{r share_class_2022_cuts, echo=FALSE}
+```{r share_class_2023_cuts, echo=FALSE}
 
 share_class_cut_count  %>% 
-  filter(Obsolete_Year == "2022") %>% 
+  filter(Obsolete_Year == current) %>% 
   arrange(desc(Count)) %>% 
   datatable()
 
 ```
+
 ## Other/NA
 
 This is an attempt to determine the share class type in cases where Morningstar has the share classs listed as other or NA. 
@@ -645,13 +654,13 @@ INC_Data %>%
 ```
 
 ## Inception Year
-(2022)
+(2023)
 
 ```{r share_class_inception_dt, echo = FALSE}
 
 INC_MODIFIED %>%
   select(Name, Share.Class.Type, Revision, Share_Class_Mod, Inception_Year, Obsolete_Year) %>% 
-  filter(Inception_Year == 2022 | Inception_Year == 2021) %>% 
+  filter(Inception_Year == current | Inception_Year == last) %>% 
   group_by(Share_Class_Mod, Inception_Year) %>%
   summarise(cases = n()) %>%
   arrange(-cases)  %>% 
@@ -662,13 +671,13 @@ INC_MODIFIED %>%
 
 ## Obsolete Year
 
-(2022)
+(2023)
 
 ```{r share_class_obsolete_dt, echo = FALSE}
 
 INC_MODIFIED %>%
   select(Name, Share.Class.Type, Revision, Share_Class_Mod, Inception_Year, Obsolete_Year) %>% 
-  filter(Obsolete_Year == 2022 | Obsolete_Year == 2021) %>% 
+  filter(Obsolete_Year == current | Obsolete_Year == last) %>% 
   group_by(Share_Class_Mod, Obsolete_Year) %>%
   summarise(cases = n()) %>%
   arrange(-cases)  %>% 
